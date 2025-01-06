@@ -23,6 +23,7 @@
 import socket
 import threading
 import time
+import json
 
 #登录监听器接口
 class LoginListener:
@@ -231,7 +232,7 @@ class TcpClient(threading.Thread):
 
 if __name__ == '__main__':
     import json
-    client = TcpClient("127.0.0.1", 8080)
+    client = TcpClient("123.249.105.160", 8080)
     client.start()
 
     #登录监听器
