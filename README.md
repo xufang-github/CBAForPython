@@ -1,2 +1,2 @@
 # CBAForPython
-python
+python for CBA
