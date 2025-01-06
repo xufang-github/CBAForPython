@@ -22,10 +22,11 @@
 #      c:客户端接收到服务器的消息后，根据消息类型进行处理，并打印到控制台
 import socket
 import threading
+import time
 
 #登录监听器接口
 class LoginListener:
-    def on_login(self, user_name,message):
+    def on_login(self,message):
         pass
 #消息监听器接口
 class MessageListener:
@@ -63,6 +64,8 @@ class TcpClient(threading.Thread):
     def connect_failed(self):
         print("连接失败")
         self.is_connected = False
+        #当前线程休眠10s
+        time.sleep(10)   #休眠1s
 
     def connect_success(self):
         self.is_connected = True
@@ -78,6 +81,9 @@ class TcpClient(threading.Thread):
         self.connect()
         while not self.is_exit:
             try:
+                #断线重连
+                if not self.is_connected:
+                    self.connect()
                 #阻塞 等待接收数据
                 data = self.sock.recv(102400)
                 if not data:
@@ -89,6 +95,7 @@ class TcpClient(threading.Thread):
             except Exception as e:
                 #超时
                 if e.args[0] != "timed out":
+                    e.print_exc()
                     print("接收数据失败:", e)
                 pass
         print("客户端线程结束")
@@ -104,53 +111,47 @@ class TcpClient(threading.Thread):
         while offfset < len(self.bytes_buffer):
             if len(self.bytes_buffer) < 4:
                 break
-            length = int.from_bytes(self.bytes_buffer[offfset:offfset+4], byteorder='big')
-            if len(self.bytes_buffer) < 4+length+4:                                       #消息头+消息体+消息尾+校验和
+            header = self.bytes_buffer[offfset:offfset+4]
+            #反转header
+            header = header[::-1]
+            length = int.from_bytes(header, byteorder='big')
+            length = self.uint32_to_int32(length)
+            print("消息长度:", length)
+            if len(self.bytes_buffer) < 4+length:                                       #消息头+消息体+消息尾+校验和
                 break
-            #校验消息完整性
-            checksum = int.from_bytes(self.bytes_buffer[offfset+4+length:offfset+4+length+4], byteorder='big')
-            if (int.from_bytes(self.bytes_buffer[offfset:offfset+4], byteorder='big') + int.from_bytes(self.bytes_buffer[offfset+4:offfset+4+length], byteorder='big') + int.from_bytes(self.bytes_buffer[offfset+4+length:offfset+4+length+4], byteorder='big')) & 0xffffffff!= checksum:
-                print("校验失败")
-                self.bytes_buffer = self.bytes_buffer[offfset+4+length+4:]
-                offfset = 0
-                continue
             #解析消息
             msg = json.loads(self.bytes_buffer[offfset+4:offfset+4+length].decode('utf8'))
+            print("消息:", msg)
             #根据消息类型进行处理
-            if msg["type"] == 1:
-                self.handle_login(self.bytes_buffer[offfset+4:offfset+4+length])
-            elif msg["type"] == 2:
-                self.handle_logout(self.bytes_buffer[offfset+4:offfset+4+length])
-            elif msg["type"] == 3:
-                self.handle_subscribe(self.bytes_buffer[offfset+4:offfset+4+length])
-            elif msg["type"] == 4:
-                self.handle_message(self.bytes_buffer[offfset+4:offfset+4+length])
+            if msg["type"] == "login":
+                self.handle_login(msg)
+            elif msg["type"] == "logout":
+                self.handle_logout( msg)
+            elif msg["type"] == "subscribe":
+                self.handle_subscribe( msg)
+            elif msg["type"] == "message":
+                self.handle_message(msg)
+
+
             else:
                 print("未知消息类型")
             #删除已处理的消息
             self.bytes_buffer = self.bytes_buffer[offfset+4+length+4:]
             offfset = 0
 
-    def handle_login(self, data):
-        #解析登录消息
-        msg = data.decode('utf8')
+    def handle_login(self, msg):
+        print("登录消息:", msg)
         #遍历登录监听器，通知登录成功
         for listener in self.login_listener:
-            listener.on_login(msg["userName"], msg["message"])
+            listener.on_login(msg["message"])
 
-    def handle_logout(self, data):
-        #解析登出消息
-        msg = data.decode('utf8')
+    def handle_logout(self, msg):
         print("登出消息:", msg)
 
-    def handle_subscribe(self, data):
-        #解析订阅消息
-        msg = data.decode('utf8')
+    def handle_subscribe(self, msg):
         print("订阅消息:", msg)
 
-    def handle_message(self, data):
-        #解析消息消息
-        msg = data.decode('utf8')
+    def handle_message(self, msg):
         #遍历消息监听器，通知消息
         for listener in self.message_listener:
             listener.on_message(msg["userName"],msg["topic"], msg["message"])
@@ -167,7 +168,7 @@ class TcpClient(threading.Thread):
 
     def send_logout(self, user_name):
         #发送登出消息
-        msg = {"type":2, "userName":user_name}
+        msg = {"type":"logout", "userName":user_name}
         self.send_message_self(msg)
 
     def send_subscribe(self, topic):
@@ -175,13 +176,22 @@ class TcpClient(threading.Thread):
             return
         self.topics.append(topic)
         #发送订阅消息
-        msg = {"type":3, "topic":topic}
+        msg = {"type":"subscribe", "topic":topic}
         self.send_message_self(msg)
 
     def send_message(self, topic, message):
         #发送消息消息   
-        msg = {"type":4, "topic":topic, "message":message}
+        msg = {"type":"message", "topic":topic, "message":message}
         self.send_message_self(msg)
+
+    def to_uint32(self,val):
+        return val & 0xFFFFFFFF
+    
+    def uint32_to_int32(self,uint32_value):
+        if uint32_value <= 0x7FFFFFFF:
+            return uint32_value  # No conversion needed for positive values
+        else:
+            return uint32_value - 0x100000000 
 
     def send_message_self(self, msg):
         msg.update({"userName":self.user_name})
@@ -189,13 +199,11 @@ class TcpClient(threading.Thread):
         if not self.is_connected:
             print("未连接服务器")
             return
-        
         body = json.dumps(msg).encode('utf8')
-        header = len(body).to_bytes(4, byteorder='big')
-        print("消息头:", header)
-        print("消息头大小:", len(header))
+        header = self.to_uint32(len(body)).to_bytes(4, byteorder='big')
+        #反转header
+        header = header[::-1]
         data = header + body
-        print("发送数据:", data)
         #发送消息
         try:
             self.sock.sendall(data)
@@ -223,13 +231,13 @@ class TcpClient(threading.Thread):
 
 if __name__ == '__main__':
     import json
-    client = TcpClient("127.0.0.1", 8081)
+    client = TcpClient("127.0.0.1", 8080)
     client.start()
 
     #登录监听器
     class MyLoginListener(LoginListener):
-        def on_login(self, user_name, message):
-            print("登录结果:", user_name, message)
+        def on_login(self,message):
+            print("登录结果:",message)
 
     #消息监听器
     class MyMessageListener(MessageListener):
@@ -241,7 +249,7 @@ if __name__ == '__main__':
 
 
     while True:
-        operation = input("请输入操作(login, logout, subscribe, message, exit):")
+        operation = input("请输入操作(login, logout, subscribe, message, exit):\n")
         if operation == "login":
             user_name = input("请输入用户名:")
             password = input("请输入密码:")
